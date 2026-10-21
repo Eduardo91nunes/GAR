@@ -19,6 +19,7 @@ app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
+
 const pool = mysql.createPool({
   host: process.env.DB_HOST || 'localhost',
   port: Number(process.env.DB_PORT || 3306),
@@ -28,7 +29,14 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10,
   timezone: 'Z',
+  ssl: process.env.DB_SSL_CA
+    ? {
+        ca: process.env.DB_SSL_CA,
+        rejectUnauthorized: true,
+      }
+    : undefined,
 });
+
 // Tudo em UTC no banco; o front converte para o horário local
 pool.pool.on('connection', (conn) => conn.query("SET time_zone = '+00:00'"));
 
