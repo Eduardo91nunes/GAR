@@ -73,8 +73,7 @@ const textoDiscord = (valor, max = 1024) => {
   return texto.length > max ? `${texto.slice(0, max - 1)}…` : texto;
 };
 
-// `anexo` pode ser um arquivo ou uma lista (até 10). `extras` são embeds adicionais (até 10 no total).
-async function enviarEmbedDiscord(channelId, embed, anexo = null, extras = []) {
+async function enviarEmbedDiscord(channelId, embed, anexo = null) {
   if (!DISCORD_TOKEN) {
     console.warn('[Discord] DISCORD_BOT_TOKEN não configurado; notificação ignorada.');
     return;
@@ -82,15 +81,12 @@ async function enviarEmbedDiscord(channelId, embed, anexo = null, extras = []) {
   try {
     let body;
     const headers = { Authorization: `Bot ${DISCORD_TOKEN}` };
-    const embeds = [embed, ...extras].filter(Boolean).slice(0, 10);
-    const payload = { embeds, allowed_mentions: { parse: [] } };
-    const anexos = (Array.isArray(anexo) ? anexo : [anexo]).filter((a) => a?.dados).slice(0, 10);
-    if (anexos.length) {
+    const payload = { embeds: [embed], allowed_mentions: { parse: [] } };
+    if (anexo?.dados) {
       const form = new FormData();
+      const nome = anexo.nome || 'anexo';
       form.append('payload_json', JSON.stringify(payload));
-      anexos.forEach((a, i) => {
-        form.append(`files[${i}]`, new Blob([a.dados], { type: a.mime || 'application/octet-stream' }), a.nome || `anexo-${i + 1}`);
-      });
+      form.append('files[0]', new Blob([anexo.dados], { type: anexo.mime || 'application/octet-stream' }), nome);
       body = form;
     } else {
       headers['Content-Type'] = 'application/json';
@@ -470,48 +466,16 @@ app.post('/api/acoes', auth, upload.any(), h(async (req, res) => {
         ],
         footer: { text: 'Unidade GAR • Sistema de registros' },
       };
-      // Uma foto por embed, com o modelo do veículo. O Discord limita cada mensagem a
-      // 10 embeds e ~10 MB, então as fotos vão em lotes de até 9 fotos / 8 MB.
-      const EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' };
-      const fotos = veic.filter((v) => arquivos[`imagem_${v.i}`]).map((v, n) => {
-        const f = arquivos[`imagem_${v.i}`];
-        const nome = `acao-${r.insertId}-${n + 1}.${EXT[f.mimetype] || 'img'}`;
-        return {
-          anexo: { dados: f.buffer, mime: f.mimetype, nome },
-          embed: {
-            color: embed.color,
-            description: `🚗 ${v.modelo.trim()} — ${v.situacao === 'preso' ? 'Preso' : 'Fuga'}`,
-            image: { url: `attachment://${nome}` },
-          },
-          tamanho: f.buffer.length,
-        };
-      });
-      const lotes = [];
-      let atual = [];
-      let bytes = 0;
-      for (const foto of fotos) {
-        if (atual.length >= 9 || (atual.length && bytes + foto.tamanho > 8 * 1024 * 1024)) {
-          lotes.push(atual);
-          atual = [];
-          bytes = 0;
-        }
-        atual.push(foto);
-        bytes += foto.tamanho;
+      let anexo = null;
+      const comFoto = veic.find((v) => arquivos[`imagem_${v.i}`]);
+      if (comFoto) {
+        const f = arquivos[`imagem_${comFoto.i}`];
+        const ext = ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' })[f.mimetype] || 'img';
+        const nome = `acao-${r.insertId}.${ext}`;
+        embed.image = { url: `attachment://${nome}` };
+        anexo = { dados: f.buffer, mime: f.mimetype, nome };
       }
-      if (atual.length) lotes.push(atual);
-
-      if (!lotes.length) {
-        await enviarEmbedDiscord(DISCORD_CHANNELS.acoes, embed);
-      } else {
-        for (const [i, lote] of lotes.entries()) {
-          await enviarEmbedDiscord(
-            DISCORD_CHANNELS.acoes,
-            i === 0 ? embed : null, // o resumo da ação vai só na primeira mensagem
-            lote.map((l) => l.anexo),
-            lote.map((l) => l.embed),
-          );
-        }
-      }
+      await enviarEmbedDiscord(DISCORD_CHANNELS.acoes, embed, anexo);
     } catch (e) {
       console.error('[Discord] Falha ao notificar ação:', e.message);
     }
