@@ -5,6 +5,7 @@ import mysql from 'mysql2/promise';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
+import { Client, GatewayIntentBits, Events } from 'discord.js';
 
 const TIPOS_OCORRENCIA = ['Corrida Ilegal', 'Caixa Eletrônico', 'Tráfico de Drogas', 'Visual Armado', 'Código 5', 'Fuga de Abordagem', 'Roubo de Veículo', 'Roubo a Residência', 'Outros'];
 const TIPOS_ACAO = ['Banco Central', 'Banco Paleto', 'Banco Fleca', 'Life Invader', 'Lojinha', 'Joalheria', 'Outros'];
@@ -42,6 +43,26 @@ pool.pool.on('connection', (conn) => conn.query("SET time_zone = '+00:00'"));
 
 // Integração Discord: o token fica exclusivamente no ambiente do backend.
 const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
+
+// Conexão persistente do bot Discord
+const discordClient = DISCORD_TOKEN
+  ? new Client({
+      intents: [GatewayIntentBits.Guilds],
+    })
+  : null;
+
+if (discordClient) {
+  discordClient.once(Events.ClientReady, (client) => {
+    console.log(`[Discord] Bot conectado como ${client.user.tag}`);
+  });
+
+  discordClient.login(DISCORD_TOKEN).catch((erro) => {
+    console.error('[Discord] Falha ao conectar o bot:', erro.message);
+  });
+} else {
+  console.warn('[Discord] DISCORD_BOT_TOKEN não configurado.');
+}
+
 const DISCORD_CHANNELS = {
   ocorrencias: process.env.DISCORD_CHANNEL_QRU || '1559689969386258432',
   acoes: process.env.DISCORD_CHANNEL_ACOES || '1559689783863672924',
