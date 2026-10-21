@@ -32,9 +32,9 @@ const pool = mysql.createPool({
   timezone: 'Z',
   ssl: process.env.DB_SSL_CA
     ? {
-        ca: process.env.DB_SSL_CA,
-        rejectUnauthorized: true,
-      }
+      ca: process.env.DB_SSL_CA,
+      rejectUnauthorized: true,
+    }
     : undefined,
 });
 
@@ -47,8 +47,8 @@ const DISCORD_TOKEN = process.env.DISCORD_BOT_TOKEN;
 // Conexão persistente do bot Discord
 const discordClient = DISCORD_TOKEN
   ? new Client({
-      intents: [GatewayIntentBits.Guilds],
-    })
+    intents: [GatewayIntentBits.Guilds],
+  })
   : null;
 
 if (discordClient) {
@@ -402,7 +402,7 @@ app.get('/api/acoes', auth, h(async (req, res) => {
      FROM acoes a JOIN usuarios cu ON cu.id = a.criado_por ORDER BY a.criado_em DESC LIMIT 200`);
   if (acoes.length) {
     const ids = acoes.map((a) => a.id);
-    const [veic] = await pool.query('SELECT acao_id, modelo, situacao FROM acao_veiculos WHERE acao_id IN (?)', [ids]);
+    const [veic] = await pool.query('SELECT acao_id, modelo, situacao, imagem_id FROM acao_veiculos WHERE acao_id IN (?)', [ids]);
     const [ofs] = await pool.query('SELECT ao.acao_id, u.nome FROM acao_oficiais ao JOIN usuarios u ON u.id = ao.usuario_id WHERE ao.acao_id IN (?) ORDER BY u.nome', [ids]);
     for (const a of acoes) {
       a.veiculos = veic.filter((v) => v.acao_id === a.id);
@@ -412,48 +412,74 @@ app.get('/api/acoes', auth, h(async (req, res) => {
   res.json({ acoes, tipos: TIPOS_ACAO });
 }));
 
-app.post('/api/acoes', auth, h(async (req, res) => {
-  const { descricao, tipo, resultado, oficiais = [], veiculos = [] } = req.body;
+app.post('/api/acoes', auth, upload.any(), h(async (req, res) => {
+  let body = req.body;
+  if (typeof req.body.dados === 'string') {
+    try { body = JSON.parse(req.body.dados); } catch { return res.status(400).json({ erro: 'Dados inválidos.' }); }
+  }
+  const { descricao, tipo, resultado, oficiais = [], veiculos = [] } = body;
   if (!descricao?.trim()) return res.status(400).json({ erro: 'Informe a descrição da ação.' });
   if (!TIPOS_ACAO.includes(tipo)) return res.status(400).json({ erro: 'Tipo de ação inválido.' });
   if (!['vitoria', 'derrota'].includes(resultado)) return res.status(400).json({ erro: 'Informe o resultado da ação.' });
   if (!oficiais.length) return res.status(400).json({ erro: 'Selecione ao menos um oficial.' });
-  const veic = veiculos.filter((v) => v.modelo?.trim());
+
+  // mantém o índice original para casar cada veículo com o seu arquivo (imagem_0, imagem_1...)
+  const veic = veiculos.map((v, i) => ({ ...v, i })).filter((v) => v.modelo?.trim());
   if (veic.some((v) => !['fuga', 'preso'].includes(v.situacao))) return res.status(400).json({ erro: 'Informe se o veículo fugiu ou foi preso.' });
+
+  const arquivos = {};
+  for (const f of req.files || []) {
+    if (!f.mimetype.startsWith('image/')) return res.status(400).json({ erro: 'Os anexos precisam ser imagens.' });
+    arquivos[f.fieldname] = f;
+  }
 
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
     const [r] = await conn.query('INSERT INTO acoes (descricao, tipo, resultado, criado_por) VALUES (?,?,?,?)', [descricao.trim(), tipo, resultado, req.user.id]);
     await conn.query('INSERT INTO acao_oficiais (acao_id, usuario_id) VALUES ?', [[...new Set(oficiais)].map((id) => [r.insertId, id])]);
-    if (veic.length) await conn.query('INSERT INTO acao_veiculos (acao_id, modelo, situacao) VALUES ?', [veic.map((v) => [r.insertId, v.modelo.trim(), v.situacao])]);
+    for (const v of veic) {
+      let imagemId = null;
+      const f = arquivos[`imagem_${v.i}`];
+      if (f) {
+        const [img] = await conn.query('INSERT INTO imagens (mime, dados) VALUES (?,?)', [f.mimetype, f.buffer]);
+        imagemId = img.insertId;
+      }
+      await conn.query('INSERT INTO acao_veiculos (acao_id, modelo, situacao, imagem_id) VALUES (?,?,?,?)', [r.insertId, v.modelo.trim(), v.situacao, imagemId]);
+    }
     await conn.commit();
 
-    const [[registro]] = await pool.query(
-      `SELECT a.id, a.descricao, a.tipo, a.resultado, a.criado_em, u.nome AS criado_por,
-              (SELECT GROUP_CONCAT(u2.nome ORDER BY u2.nome SEPARATOR ', ')
-               FROM acao_oficiais ao JOIN usuarios u2 ON u2.id = ao.usuario_id WHERE ao.acao_id = a.id) AS oficiais
-       FROM acoes a JOIN usuarios u ON u.id = a.criado_por WHERE a.id = ?`, [r.insertId]);
-    const [veiculosRegistro] = await pool.query('SELECT modelo, situacao FROM acao_veiculos WHERE acao_id = ?', [r.insertId]);
-    if (registro) {
-      const veiculosTexto = veiculosRegistro.length
-        ? veiculosRegistro.map((v) => `${v.modelo} — ${v.situacao === 'preso' ? 'Preso' : 'Fuga'}`).join('\n')
-        : 'Nenhum veículo informado';
-      await enviarEmbedDiscord(DISCORD_CHANNELS.acoes, {
-        title: `🛡️ Registro de ação #${registro.id}`,
-        color: registro.resultado === 'vitoria' ? 0x2ECC71 : 0xE74C3C,
+    // Notificação no Discord (uma falha aqui não desfaz o registro)
+    try {
+      const [nomes] = await pool.query('SELECT nome FROM usuarios WHERE id IN (?) ORDER BY nome', [[...new Set(oficiais)]]);
+      const embed = {
+        title: `🎯 Registro de ação #${r.insertId}`,
+        color: resultado === 'vitoria' ? 0x2ECC71 : 0xD83C3E,
         fields: [
-          campo('Tipo de ação', registro.tipo, true),
-          campo('Resultado', registro.resultado === 'vitoria' ? 'Vitória' : 'Derrota', true),
-          campo('Oficiais envolvidos', registro.oficiais),
-          campo('Veículos', veiculosTexto),
-          campo('Descrição', registro.descricao),
-          campo('Registrado por', registro.criado_por, true),
-          campo('Data', dataLocal(registro.criado_em), true),
+          campo('Ação', tipo, true),
+          campo('Resultado', resultado === 'vitoria' ? 'VITÓRIA' : 'DERROTA', true),
+          campo('Descrição', descricao.trim()),
+          campo('Veículos', veic.length ? veic.map((v) => `${v.modelo.trim()} — ${v.situacao === 'preso' ? 'Preso' : 'Fuga'}`).join('\n') : 'Nenhum'),
+          campo('Oficiais', nomes.map((n) => n.nome).join(', ')),
+          campo('Registrado por', req.user.nome, true),
+          campo('Data', dataLocal(new Date()), true),
         ],
         footer: { text: 'Unidade GAR • Sistema de registros' },
-      });
+      };
+      let anexo = null;
+      const comFoto = veic.find((v) => arquivos[`imagem_${v.i}`]);
+      if (comFoto) {
+        const f = arquivos[`imagem_${comFoto.i}`];
+        const ext = ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif' })[f.mimetype] || 'img';
+        const nome = `acao-${r.insertId}.${ext}`;
+        embed.image = { url: `attachment://${nome}` };
+        anexo = { dados: f.buffer, mime: f.mimetype, nome };
+      }
+      await enviarEmbedDiscord(DISCORD_CHANNELS.acoes, embed, anexo);
+    } catch (e) {
+      console.error('[Discord] Falha ao notificar ação:', e.message);
     }
+
     res.json({ ok: true, id: r.insertId });
   } catch (e) {
     await conn.rollback();
